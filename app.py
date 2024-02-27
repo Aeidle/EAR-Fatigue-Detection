@@ -1,3 +1,4 @@
+
 import cv2
 import dlib
 import numpy as np
@@ -8,10 +9,13 @@ import pygame
 from threading import Thread
 from datetime import datetime
 import csv
+import matplotlib.pyplot as plt
+import pandas as pd
 
 # Initialize pygame mixer for playing audio and Load the alert sound
 pygame.mixer.init()
 alert_sound = pygame.mixer.Sound("audio/wake_up.wav")
+danger_image = cv2.imread("assets/danger.png")
 
 # Function to calculate eye aspect ratio (EAR)
 def eye_aspect_ratio(eye):
@@ -20,22 +24,79 @@ def eye_aspect_ratio(eye):
     C = distance.euclidean(eye[0], eye[3])
     ear = (A + B) / (2.0 * C)
     return ear
-
-# Function to save EAR values with timestamps to CSV
-def save_ear_values(ear_values):
-    file_exists = os.path.isfile('output/ear_values.csv')
-    with open('output/ear_values.csv', mode='a', newline='\n') as file:
-        writer = csv.writer(file)
-        if not file_exists or os.stat('output/ear_values.csv').st_size == 0:
-            writer.writerow(['time', 'EAR'])
-        for ear in ear_values:
+                
+def save_ear_values(ear_values, frame_count, threshold=0.25):
+    if ear_values:
+        if frame_count % 10 == 0:
             timestamp = datetime.now().strftime("%M:%S:%f")
-            writer.writerow([f"{timestamp}", f"{ear}"])
+            with open('output/ear_values.csv', mode='a', newline='\n') as file:
+                writer = csv.writer(file)
+                if file.tell() == 0:
+                    writer.writerow(['time', 'EAR'])
+                for ear in ear_values:  # Iterate over all EAR values
+                    writer.writerow([timestamp, ear])  # Save each EAR value with the timestamp
+            
+            with open('output/tiredness.csv', mode='a', newline='\n') as tiredness_file:
+                tiredness_writer = csv.writer(tiredness_file)
+                if tiredness_file.tell() == 0:
+                    tiredness_writer.writerow(['time', 'EAR'])
+                
+                for ear in ear_values:  # Iterate over all EAR values
+                    if ear < threshold:  # Check if the EAR value is below the threshold
+                        tiredness_writer.writerow([timestamp, 1])  # Save the EAR value if below the threshold
+                    else:
+                        tiredness_writer.writerow([timestamp, 0])
+
+def plot_ear_values(ear_df:pd.DataFrame, tire_df:pd.DataFrame) -> None:
+    """
+    Plot the EAR values over time.
+
+    Args:
+        ear_df (pd.DataFrame): DataFrame containing the raw EAR values.
+        tire_df (pd.DataFrame): DataFrame containing the tiredness EAR values.
+    """
+    # Create subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(30, 10), sharex=True)
+
+    # Plot raw EAR values
+    ax1.plot(range(len(ear_df['EAR'])), ear_df['EAR'], label='Raw EAR')
+    ax1.set_ylabel("Ear Value")
+    ax1.set_title("Raw EAR Values Over Time")
+    ax1.axhline(y=0.25, color='r', linestyle='--')
+    ax1.legend()
+
+    # Plot raw EAR values with color fill
+    ax2.plot(range(len(ear_df['EAR'])), ear_df['EAR'], label='Raw EAR')
+    ax2.fill_between(range(len(ear_df['EAR'])), ear_df['EAR'], where=ear_df['EAR'] < 0.25, color='red', alpha=0.5)
+    ax2.fill_between(range(len(ear_df['EAR'])), ear_df['EAR'], where=ear_df['EAR'] >= 0.25, color='green', alpha=0.5)
+    ax2.set_ylabel("Ear Value")
+    ax2.set_title("Raw EAR Values Over Time")
+    ax2.axhline(y=0.25, color='r', linestyle='--')
+    ax2.legend()
+
+    # Plot tiredness EAR values
+    ax3.plot(range(len(tire_df['EAR'])), tire_df['EAR'], label='Tiredness EAR')
+    ax3.set_xlabel("Time")
+    ax3.set_ylabel("Ear Value")
+    ax3.set_title("Tiredness EAR Values Over Time")
+    ax3.axhline(y=0.25, color='r', linestyle='--')
+    ax3.legend()
+
+    # Adjust layout
+    plt.tight_layout()
+
+    # Save the plot
+    plt.savefig("output/plot.png", dpi=600, bbox_inches='tight')
+        
+    # Display the subplots
+    plt.show()
 
 # Initialize variables
 ear_values = []
 frame_count = 0
+frame_count_2 = 0
 alert_count = 0
+exit_flag = False
 
 # Load face detector and landmark predictor
 detector = dlib.get_frontal_face_detector()
@@ -94,24 +155,33 @@ os.makedirs(os.path.join(output_dir, 'contrast_improv'), exist_ok=True)
 # Open the video file
 cap = cv2.VideoCapture(0)
 
+width = 1080
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
 # Initialize variables
-frame_count = 0
 fps = cap.get(cv2.CAP_PROP_FPS)
 interval = int(fps) * 1  # Extract frame every 1 second
 
 # Function to process frames and save processed frames every 1 second
 def process_frames_and_save():
-    global frame_count  # Declare frame_count as global
+    global frame_count, exit_flag  # Declare frame_count and exit_flag as global
     
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
+        if not ret or exit_flag:  # Exit loop if not ret or exit_flag is True
             break
         
         frame_count += 1
         
         if frame_count % interval == 0:
             processed_frame = process_frame(frame, frame_count, output_dir)
+        
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            exit_flag = True  # Set exit_flag to True if 'q' is pressed
+            break
 
 # Start a thread for processing frames and saving processed frames
 processing_thread = Thread(target=process_frames_and_save)
@@ -143,6 +213,7 @@ while cap.isOpened():
 
         # Average EAR of both eyes
         ear = (leftEAR + rightEAR) / 2.0
+        ear_values.append(ear)
         
         # Draw eyes contours
         leftEyeHull = cv2.convexHull(leftEye)
@@ -170,7 +241,13 @@ while cap.isOpened():
             if alert_count >= 10 and not pygame.mixer.get_busy():
                 # Visual alert (draw text)
                 cv2.putText(frame, "ALERT! Fatigue Detected !!!", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 4)
+                cv2.putText(frame, "ALERT! Fatigue Detected !!!", (frame.shape[1] - 550, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 4)
+
+                # Display danger image on both sides
+                frame[50:50 + danger_image.shape[0], 50:50 + danger_image.shape[1]] = danger_image
+                frame[50:50 + danger_image.shape[0], frame.shape[1] - 50 - danger_image.shape[1]:frame.shape[1] - 50] = danger_image
 
                 # Play sound alert
                 alert_sound.play()
@@ -182,16 +259,16 @@ while cap.isOpened():
     cv2.imshow("Frame", frame)
     key = cv2.waitKey(1) & 0xFF
     if key == ord("q"):
+        exit_flag = True
         break
 
     # Increment frame count
-    frame_count += 1
+    frame_count_2 += 1
     
     # Check if it's time to save EAR values to CSV
-    if frame_count == 10:  # Save EAR values every 10 frames
-        save_ear_values(ear_values)
-        frame_count = 0
-        ear_values = []
+    if frame_count_2 % 10 == 0:  # Save EAR values every 10 frames
+        save_ear_values(ear_values, frame_count_2)
+        ear_values = []  # Clear the ear_values list
         
 # Wait for the processing thread to finish
 processing_thread.join()
@@ -199,3 +276,8 @@ processing_thread.join()
 # Release resources
 cap.release()
 cv2.destroyAllWindows()
+
+ear_df = pd.read_csv('output/ear_values.csv')
+tire_df = pd.read_csv('output/tiredness.csv')
+
+plot_ear_values(ear_df, tire_df)
